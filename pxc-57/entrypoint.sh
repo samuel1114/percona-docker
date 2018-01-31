@@ -14,12 +14,21 @@ fi
 	# Get config
 	DATADIR="$("mysqld" --verbose --wsrep_provider= --help 2>/dev/null | awk '$1 == "datadir" { print $2; exit }')"
 
+	# if we have CLUSTER_JOIN - then we do not need to perform datadir initialize
+	# the data will be copied from another node
+
+	if [ -z "$CLUSTER_JOIN" ]; then
+
 	if [ ! -e "$DATADIR/mysql" ]; then
-		if [ -z "$MYSQL_ROOT_PASSWORD" -a -z "$MYSQL_ALLOW_EMPTY_PASSWORD" -a -z "$MYSQL_RANDOM_ROOT_PASSWORD" ]; then
+		if [ -z "$MYSQL_ROOT_PASSWORD" -a -z "$MYSQL_ALLOW_EMPTY_PASSWORD" -a -z "$MYSQL_RANDOM_ROOT_PASSWORD" -a -z "$MYSQL_ROOT_PASSWORD_FILE" ]; then
                         echo >&2 'error: database is uninitialized and password option is not specified '
-                        echo >&2 '  You need to specify one of MYSQL_ROOT_PASSWORD, MYSQL_ALLOW_EMPTY_PASSWORD and MYSQL_RANDOM_ROOT_PASSWORD'
+                        echo >&2 '  You need to specify one of MYSQL_ROOT_PASSWORD, MYSQL_ROOT_PASSWORD_FILE,  MYSQL_ALLOW_EMPTY_PASSWORD or MYSQL_RANDOM_ROOT_PASSWORD'
                         exit 1
                 fi
+
+		if [ ! -z "$MYSQL_ROOT_PASSWORD_FILE" -a -z "$MYSQL_ROOT_PASSWORD" ]; then
+		  MYSQL_ROOT_PASSWORD=$(cat $MYSQL_ROOT_PASSWORD_FILE)
+		fi
 		mkdir -p "$DATADIR"
 
 		echo "Running --initialize-insecure on $DATADIR"
@@ -101,6 +110,7 @@ fi
 		#mv /etc/my.cnf $DATADIR
 	fi
 	chown -R mysql:mysql "$DATADIR"
+	fi
 
 if [ -z "$DISCOVERY_SERVICE" ]; then
 	cluster_join=$CLUSTER_JOIN
@@ -113,7 +123,7 @@ echo
 function join {
   local IFS="$1"
   shift
-  joined=$(tr "$IFS" '\n' <<< "$*" | sort -un | tr '\n' "$IFS")
+  joined=$(tr "$IFS" '\n' <<< "$*" | sort -u | tr '\n' "$IFS")
   echo "${joined%?}"
 }
 
@@ -129,21 +139,17 @@ curl http://$DISCOVERY_SERVICE/v2/keys/pxc-cluster/queue/$CLUSTER_NAME -XPOST -d
 i=$(curl http://$DISCOVERY_SERVICE/v2/keys/pxc-cluster/queue/$CLUSTER_NAME | jq -r '.node.nodes[].value')
 
 # this remove my ip from the list
-i1="${i[@]/$ipaddr}"
-cluster_join1=$(join , $i1)
+i1="${i[@]//$ipaddr}"
 
 # Register the current IP in the discovery service
-
 # key set to expire in 30 sec. There is a cronjob that should update them regularly
 curl http://$DISCOVERY_SERVICE/v2/keys/pxc-cluster/$CLUSTER_NAME/$ipaddr/ipaddr -XPUT -d value="$ipaddr" -d ttl=30
 curl http://$DISCOVERY_SERVICE/v2/keys/pxc-cluster/$CLUSTER_NAME/$ipaddr/hostname -XPUT -d value="$hostname" -d ttl=30
 curl http://$DISCOVERY_SERVICE/v2/keys/pxc-cluster/$CLUSTER_NAME/$ipaddr -XPUT -d ttl=30 -d dir=true -d prevExist=true
 
-#i=`curl http://$DISCOVERY_SERVICE/v2/keys/pxc-cluster/$CLUSTER_NAME/ | jq -r '.node.nodes[].value'`
 i=$(curl http://$DISCOVERY_SERVICE/v2/keys/pxc-cluster/$CLUSTER_NAME/?quorum=true | jq -r '.node.nodes[]?.key' | awk -F'/' '{print $(NF)}')
 # this remove my ip from the list
-i2="${i[@]/$ipaddr}"
-cluster_join2=$(join , $i1)
+i2="${i[@]//$ipaddr}"
 cluster_join=$(join , $i1 $i2 )
 echo "Joining cluster $cluster_join"
 
